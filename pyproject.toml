@@ -1,6 +1,6 @@
 [project]
 name = "rugguard-pydantic-ai-agent"
-version = "0.1.0"
+version = "0.1.1"
 description = "Pydantic AI integration kit for RugGuard — pre-trade safety as a typed tool. Pay-per-call via x402 on Base mainnet."
 readme = "README.md"
 license = { text = "MIT" }

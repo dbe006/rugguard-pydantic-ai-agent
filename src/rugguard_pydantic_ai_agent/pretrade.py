@@ -23,7 +23,11 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, Field
 
 from rugguard_pydantic_ai_agent.cache import DecisionCache
-from rugguard_pydantic_ai_agent.x402_pay import X402PaymentError, paid_post
+from rugguard_pydantic_ai_agent.x402_pay import (
+    X402PaymentError,
+    _validate_https_scheme,
+    paid_post,
+)
 
 DEFAULT_API_URL = "https://rugguard.redfleet.fr"
 
@@ -100,6 +104,7 @@ async def pretrade_check_async(
     private_key_hex: str | None = None,
     api_url: str | None = None,
     cache: DecisionCache | None = None,
+    max_amount_usdc: float | None = None,
 ) -> PreTradeCheckResult | PreTradeCheckError:
     """Call RugGuard /v1/pretrade/check.
 
@@ -111,16 +116,24 @@ async def pretrade_check_async(
             verdicts return `caution` regardless of policy.
         private_key_hex: EOA private key for the x402 payer. Falls back
             to env var `RUGGUARD_X402_PRIVATE_KEY` if None.
-        api_url: Override the default RugGuard endpoint (for self-hosting
-            or testnet). Falls back to env var `RUGGUARD_API_URL`.
+        api_url: Override the default RugGuard endpoint. **Must use
+            https://** unless the host is loopback (localhost /
+            127.0.0.1 / ::1 / 0.0.0.0) — non-https URLs are rejected
+            before signing to prevent plaintext leakage of the trade
+            intent and MITM tampering of the policy_recommendation.
+            Falls back to env var `RUGGUARD_API_URL`.
         cache: Optional `DecisionCache` instance. Hits short-circuit
-            without paying, so the agent can call the check multiple
-            times during a single trade decision without double-billing.
+            without paying.
+        max_amount_usdc: Optional per-call USDC ceiling. If set, a 402
+            advertising more than this is refused before signing.
+            Defends against surprise price changes or hostile 402s.
+            Default None (no per-call cap).
 
     Returns:
         `PreTradeCheckResult` on success. `PreTradeCheckError` on
-        recoverable failure (missing creds, payment rejected, non-200).
-        The agent can pattern-match the `error` field to branch.
+        recoverable failure. `error` is one of `missing_credentials`,
+        `payment_failed`, `non_200`, `request_failed`. https-violation
+        maps to `request_failed` (configuration error, not payment).
     """
     pk = private_key_hex or os.environ.get("RUGGUARD_X402_PRIVATE_KEY")
     if not pk:
@@ -143,6 +156,17 @@ async def pretrade_check_async(
 
     base_url = (api_url or os.environ.get("RUGGUARD_API_URL") or DEFAULT_API_URL).rstrip("/")
     url = f"{base_url}/v1/pretrade/check"
+
+    # Validate the trust root up-front. A plaintext api_url would leak the
+    # trade intent in flight AND let a MITM tamper with the returned
+    # policy_recommendation. paid_post repeats this internally as defense
+    # in depth — surface it here as `request_failed` so the kit's error
+    # vocabulary is correct (it's a config error, not a payment error).
+    try:
+        _validate_https_scheme(url)
+    except X402PaymentError as exc:
+        return PreTradeCheckError(error="request_failed", message=str(exc))
+
     body = {
         "chain": chain,
         "contract": contract,
@@ -151,7 +175,12 @@ async def pretrade_check_async(
     }
 
     try:
-        status, response = await paid_post(url=url, json_body=body, private_key_hex=pk)
+        status, response = await paid_post(
+            url=url,
+            json_body=body,
+            private_key_hex=pk,
+            max_amount_usdc=max_amount_usdc,
+        )
     except X402PaymentError as exc:
         return PreTradeCheckError(error="payment_failed", message=str(exc))
     except Exception as exc:

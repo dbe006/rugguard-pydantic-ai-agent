@@ -38,4 +38,4 @@ __all__ = [
     "register_rugguard_tool",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"

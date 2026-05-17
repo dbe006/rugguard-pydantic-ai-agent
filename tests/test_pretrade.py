@@ -196,3 +196,63 @@ def test_register_rugguard_tool_smoke():
     # without raising (the tool was wired correctly).
     output = getattr(result, "output", None) or getattr(result, "data", None)
     assert output is not None
+
+
+# --- v0.1.1 security batch 1: https + max_amount_usdc regression tests ---
+
+
+@pytest.mark.asyncio
+async def test_pretrade_rejects_plaintext_api_url():
+    """A plaintext api_url leaks trade intent + lets a MITM tamper the
+    policy_recommendation. v0.1.1 refuses non-https unless loopback."""
+    result = await pretrade_check_async(
+        chain="base",
+        contract="0xABC",
+        intended_trade_usd=100.0,
+        private_key_hex="0x" + "ab" * 32,
+        api_url="http://attacker.example",
+    )
+    assert isinstance(result, PreTradeCheckError)
+    assert result.error == "request_failed"
+    assert "https" in result.message.lower()
+
+
+@pytest.mark.asyncio
+async def test_pretrade_allows_loopback_http_for_dev():
+    """Dev against a local RugGuard should still work over http://localhost."""
+
+    async def fake(*, url, json_body, **_kw):
+        assert url.startswith("http://localhost"), url
+        return 200, _canned_response()
+
+    with patch("rugguard_pydantic_ai_agent.pretrade.paid_post", new=fake):
+        result = await pretrade_check_async(
+            chain="base",
+            contract="0xABC",
+            intended_trade_usd=100.0,
+            private_key_hex="0x" + "ab" * 32,
+            api_url="http://localhost:8000",
+        )
+    assert isinstance(result, PreTradeCheckResult)
+
+
+@pytest.mark.asyncio
+async def test_pretrade_passes_max_amount_usdc_to_paid_post():
+    """v0.1.1 plumbs max_amount_usdc to paid_post so callers can refuse
+    a 402 advertising more than the expected price."""
+    captured: dict = {}
+
+    async def fake(*, url, json_body, private_key_hex, max_amount_usdc=None, **_kw):
+        captured["max_amount_usdc"] = max_amount_usdc
+        return 200, _canned_response()
+
+    with patch("rugguard_pydantic_ai_agent.pretrade.paid_post", new=fake):
+        await pretrade_check_async(
+            chain="base",
+            contract="0xABC",
+            intended_trade_usd=100.0,
+            private_key_hex="0x" + "ab" * 32,
+            max_amount_usdc=0.02,
+        )
+
+    assert captured["max_amount_usdc"] == 0.02
