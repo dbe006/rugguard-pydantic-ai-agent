@@ -1,0 +1,84 @@
+[project]
+name = "rugguard-pydantic-ai-agent"
+version = "0.1.0"
+description = "Pydantic AI integration kit for RugGuard — pre-trade safety as a typed tool. Pay-per-call via x402 on Base mainnet."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [
+    { name = "David Bellaiche" },
+]
+keywords = [
+    "rugguard",
+    "pydantic-ai",
+    "pydanticai",
+    "x402",
+    "agent",
+    "trading",
+    "crypto",
+    "base",
+    "solana",
+    "pre-trade",
+    "safety",
+    "typed",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Office/Business :: Financial",
+]
+dependencies = [
+    # Pydantic AI for the typed-tool surface. The kit also works without it
+    # at the function-level — pretrade_check_async() is framework-agnostic
+    # and can be called directly by any agent runtime. The Pydantic AI tool
+    # decorator is a thin wrapper on top.
+    "pydantic-ai>=0.0.14,<2.0",
+    "pydantic>=2.0,<3.0",
+    # x402 signing path: EIP-3009 over USDC v2. Same primitives RugGuard's
+    # MCP client uses, copy-pasted here so the kit reads end-to-end without
+    # a transitive MCP dependency.
+    "eth-account>=0.13,<1.0",
+    # Async HTTP client.
+    "httpx>=0.28,<1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0,<9.0",
+    "pytest-asyncio>=0.24,<2.0",
+    "ruff>=0.6,<1.0",
+]
+
+[project.urls]
+Homepage = "https://rugguard.redfleet.fr"
+Repository = "https://github.com/dbe006/rugguard-pydantic-ai-agent"
+Issues = "https://github.com/dbe006/rugguard-pydantic-ai-agent/issues"
+"RugGuard API" = "https://rugguard.redfleet.fr/openapi.json"
+"Signed report verifier" = "https://pypi.org/project/rugguard-verify/"
+"MCP server" = "https://pypi.org/project/rugguard-mcp/"
+
+[project.scripts]
+rugguard-pydantic-ai-demo = "rugguard_pydantic_ai_agent.example_agent:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "RUF"]
