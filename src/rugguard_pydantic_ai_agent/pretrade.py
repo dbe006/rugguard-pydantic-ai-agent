@@ -105,6 +105,7 @@ async def pretrade_check_async(
     api_url: str | None = None,
     cache: DecisionCache | None = None,
     max_amount_usdc: float | None = None,
+    verify: bool = False,
 ) -> PreTradeCheckResult | PreTradeCheckError:
     """Call RugGuard /v1/pretrade/check.
 
@@ -128,12 +129,22 @@ async def pretrade_check_async(
             advertising more than this is refused before signing.
             Defends against surprise price changes or hostile 402s.
             Default None (no per-call cap).
+        verify: When True (default False), soft-imports `rugguard-verify`
+            and Ed25519-verifies the signed response in-band before
+            returning. Requires `pip install rugguard-pydantic-ai-agent[verify]`
+            (or `pip install rugguard-verify` separately). Verification
+            failure surfaces as `PreTradeCheckError(error="request_failed",
+            message="signature_invalid: ...")`. Cache hits skip
+            re-verification (the signature was already checked on insert).
+            Recommended for production agents that consume the
+            policy_recommendation directly — without it, a malicious
+            api_url + MITM can serve tampered verdicts.
 
     Returns:
         `PreTradeCheckResult` on success. `PreTradeCheckError` on
         recoverable failure. `error` is one of `missing_credentials`,
         `payment_failed`, `non_200`, `request_failed`. https-violation
-        maps to `request_failed` (configuration error, not payment).
+        and signature-verification failures both map to `request_failed`.
     """
     pk = private_key_hex or os.environ.get("RUGGUARD_X402_PRIVATE_KEY")
     if not pk:
@@ -195,10 +206,72 @@ async def pretrade_check_async(
             message=f"server returned {status}: {response!s:.200}",
         )
 
+    # In-band Ed25519 signature verification (opt-in via verify=True).
+    # Defends against an api_url that's been swapped to attacker-controlled
+    # AND happens to bypass the https check (impossible today, but defense
+    # in depth). Cache stores the response with cache_hit=False ; on a
+    # cache hit we don't re-verify because verification on insert is
+    # sufficient.
+    if verify and response.get("signature") is not None:
+        try:
+            from rugguard_verify import verify_signed_report
+        except ImportError:
+            return PreTradeCheckError(
+                error="request_failed",
+                message=(
+                    "verify=True requires rugguard-verify. Install it via "
+                    "`pip install rugguard-verify` or "
+                    "`pip install rugguard-pydantic-ai-agent[verify]`."
+                ),
+            )
+        pubkey = await _resolve_pubkey_for_verify(base_url)
+        if pubkey is None:
+            return PreTradeCheckError(
+                error="request_failed",
+                message=(
+                    "verify=True requested but could not fetch /v1/pubkey "
+                    f"from {base_url}. Either the deployment has no signing "
+                    "configured (status=not_configured) or /v1/pubkey is "
+                    "unreachable. Re-run with verify=False if the unsigned "
+                    "state is intentional."
+                ),
+            )
+        check = verify_signed_report(response, pubkey)
+        if not check.valid:
+            return PreTradeCheckError(
+                error="request_failed",
+                message=f"signature_invalid: {check.reason}",
+            )
+
     result = PreTradeCheckResult(**response)
     if cache is not None:
         cache.put(chain, contract, response)
     return result
+
+
+async def _resolve_pubkey_for_verify(base_url: str) -> str | None:
+    """Fetch /v1/pubkey and return the active pubkey_base64, or None on
+    any failure (unreachable, not_configured, malformed). Soft-fail by
+    design — the caller (verify=True path) maps None to a structured
+    PreTradeCheckError with a clear message.
+
+    Uses httpx since rugguard-verify's fetch_pubkey is synchronous and
+    we're in an async path. Reads only public data so no caching
+    coordination is needed."""
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{base_url}/v1/pubkey")
+        if resp.status_code != 200:
+            return None
+        body = resp.json()
+        if body.get("status") != "active":
+            return None
+        pubkey = body.get("pubkey_base64")
+        return pubkey if isinstance(pubkey, str) and pubkey else None
+    except Exception:
+        return None
 
 
 # --- Pydantic AI surface ---
@@ -211,6 +284,8 @@ def register_rugguard_tool(
     private_key_hex: str | None = None,
     api_url: str | None = None,
     cache: DecisionCache | None = None,
+    max_amount_usdc: float | None = None,
+    verify: bool = False,
     tool_name: str = "pretrade_check",
 ) -> None:
     """Register the RugGuard pre-trade check as a typed tool on a Pydantic AI Agent.
@@ -219,25 +294,22 @@ def register_rugguard_tool(
     before any trade. The tool returns a typed `PreTradeCheckResult` (or
     `PreTradeCheckError`) which the LLM consumes natively.
 
-    Usage:
-        from pydantic_ai import Agent
-        from rugguard_pydantic_ai_agent import register_rugguard_tool, DecisionCache
-
-        agent = Agent("openai:gpt-4o-mini", system_prompt="You are a trading agent...")
-        register_rugguard_tool(agent, policy="balanced", cache=DecisionCache())
-
-        result = agent.run_sync("Should I buy 250 USDC of 0xABC on Base?")
-
-    The `policy`, `private_key_hex`, `api_url`, and `cache` are bound at
-    registration time — the LLM never sees them, so it cannot accidentally
-    or maliciously change them.
+    The `policy`, `private_key_hex`, `api_url`, `cache`, `max_amount_usdc`,
+    and `verify` are bound at registration time — the LLM never sees them,
+    so it cannot accidentally or maliciously change them.
 
     Args:
         agent: The Pydantic AI `Agent` instance.
-        policy: Risk policy locked at registration. The LLM cannot override.
+        policy: Risk policy locked at registration. LLM cannot override.
         private_key_hex: x402 payer key. Defaults to env var.
-        api_url: Override RugGuard endpoint (self-host / testnet).
+        api_url: Override RugGuard endpoint (self-host / testnet). Must
+            use https:// unless loopback.
         cache: Optional DecisionCache for de-duplication.
+        max_amount_usdc: Optional per-call USDC ceiling.
+        verify: When True (default False), Ed25519-verifies each signed
+            response in-band before returning it to the LLM. Requires
+            `pip install rugguard-pydantic-ai-agent[verify]`. Recommended
+            for production agents.
         tool_name: Override the tool name surfaced to the LLM.
     """
 
@@ -260,4 +332,6 @@ def register_rugguard_tool(
             private_key_hex=private_key_hex,
             api_url=api_url,
             cache=cache,
+            max_amount_usdc=max_amount_usdc,
+            verify=verify,
         )

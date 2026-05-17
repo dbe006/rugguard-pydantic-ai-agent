@@ -256,3 +256,100 @@ async def test_pretrade_passes_max_amount_usdc_to_paid_post():
         )
 
     assert captured["max_amount_usdc"] == 0.02
+
+
+# --- v0.1.2: verify=True signature verification path ---
+
+
+@pytest.mark.asyncio
+async def test_verify_true_without_signature_in_response_skips_check():
+    """If the response has no signature (unsigned deployment), verify=True
+    is a no-op — return the typed result, do not crash on missing pubkey."""
+    response = _canned_response()  # signature=None by default in fixtures
+    response["signature"] = None
+    response["key_fingerprint"] = None
+
+    async def fake(*, url, json_body, **_kw):
+        return 200, response
+
+    with patch("rugguard_pydantic_ai_agent.pretrade.paid_post", new=fake):
+        result = await pretrade_check_async(
+            chain="base",
+            contract="0xABC",
+            intended_trade_usd=100.0,
+            private_key_hex="0x" + "ab" * 32,
+            verify=True,
+        )
+
+    assert isinstance(result, PreTradeCheckResult)
+
+
+@pytest.mark.asyncio
+async def test_verify_true_with_invalid_signature_surfaces_typed_error():
+    """Tampered signature → PreTradeCheckError(request_failed) with
+    signature_invalid in the message. Never returns a tampered result."""
+    response = _canned_response()
+    response["signature"] = "VEVTVA=="  # base64 "TEST" — garbage signature
+    response["key_fingerprint"] = "deadbeef12345678"
+
+    async def fake_post(*, url, json_body, **_kw):
+        return 200, response
+
+    async def fake_pubkey(_base_url):
+        # Return any valid base64 pubkey — verify_signed_report will reject
+        # the garbage signature regardless.
+        import base64
+
+        return base64.b64encode(b"\x00" * 32).decode()
+
+    with (
+        patch("rugguard_pydantic_ai_agent.pretrade.paid_post", new=fake_post),
+        patch(
+            "rugguard_pydantic_ai_agent.pretrade._resolve_pubkey_for_verify",
+            new=fake_pubkey,
+        ),
+    ):
+        result = await pretrade_check_async(
+            chain="base",
+            contract="0xABC",
+            intended_trade_usd=100.0,
+            private_key_hex="0x" + "ab" * 32,
+            verify=True,
+        )
+
+    assert isinstance(result, PreTradeCheckError)
+    assert result.error == "request_failed"
+    assert "signature_invalid" in result.message.lower() or "fingerprint" in result.message.lower()
+
+
+@pytest.mark.asyncio
+async def test_verify_true_when_pubkey_fetch_fails_returns_typed_error():
+    """/v1/pubkey unreachable → typed error, never the unverified result."""
+    response = _canned_response()
+    response["signature"] = "VEVTVA=="
+    response["key_fingerprint"] = "abc"
+
+    async def fake_post(*, url, json_body, **_kw):
+        return 200, response
+
+    async def fake_pubkey_fails(_base_url):
+        return None  # simulates /v1/pubkey 503 or not_configured
+
+    with (
+        patch("rugguard_pydantic_ai_agent.pretrade.paid_post", new=fake_post),
+        patch(
+            "rugguard_pydantic_ai_agent.pretrade._resolve_pubkey_for_verify",
+            new=fake_pubkey_fails,
+        ),
+    ):
+        result = await pretrade_check_async(
+            chain="base",
+            contract="0xABC",
+            intended_trade_usd=100.0,
+            private_key_hex="0x" + "ab" * 32,
+            verify=True,
+        )
+
+    assert isinstance(result, PreTradeCheckError)
+    assert result.error == "request_failed"
+    assert "pubkey" in result.message.lower()

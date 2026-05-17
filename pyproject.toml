@@ -1,6 +1,6 @@
 [project]
 name = "rugguard-pydantic-ai-agent"
-version = "0.1.1"
+version = "0.1.2"
 description = "Pydantic AI integration kit for RugGuard — pre-trade safety as a typed tool. Pay-per-call via x402 on Base mainnet."
 readme = "README.md"
 license = { text = "MIT" }
@@ -54,6 +54,11 @@ dev = [
     "pytest-asyncio>=0.24,<2.0",
     "ruff>=0.6,<1.0",
 ]
+# In-band Ed25519 signature verification on /v1/pretrade/check responses.
+# Opt-in via `pretrade_check_async(..., verify=True)` or
+# `register_rugguard_tool(agent, ..., verify=True)`. Install:
+#   pip install "rugguard-pydantic-ai-agent[verify]"
+verify = ["rugguard-verify>=0.1.1,<1.0"]
 
 [project.urls]
 Homepage = "https://rugguard.redfleet.fr"
